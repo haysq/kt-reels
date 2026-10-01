@@ -1,0 +1,47 @@
+# Her sabah karabuktadilat.com'daki günün Reels kartlarından video üretir ve "videolar" dalına koyar.
+# Sunucu (lib/ig-yayinla.php) videoyu raw.githubusercontent.com'dan indirip @karabuktbd'ye paylaşır.
+# Gizli anahtar yok: yalnızca herkese açık kartları okur, kendi deposuna yazar.
+name: reels
+on:
+  schedule:
+    - cron: '40 3 * * *'   # 06:40 Türkiye (paket 06:00'da üretilir)
+  workflow_dispatch:
+    inputs:
+      tarih: { description: 'YYYY-MM-DD (boşsa bugün)', required: false }
+permissions:
+  contents: write
+jobs:
+  yap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null
+      - name: Kartları indir
+        run: |
+          D="${{ github.event.inputs.tarih }}"; [ -n "$D" ] || D=$(TZ=Europe/Istanbul date +%F); echo "D=$D" >> $GITHUB_ENV
+          B=https://karabuktadilat.com/ig/$D; mkdir -p k out/$D
+          for on in a b c; do i=1; while [ $i -le 20 ] && curl -fsS "$B/reel-$on-$i.jpg" -o "k/reel-$on-$i.jpg" 2>/dev/null; do i=$((i+1)); done; rm -f "k/reel-$on-$i.jpg"; done
+          ls k/reel-a-1.jpg k/reel-b-1.jpg k/reel-c-1.jpg   # kart yoksa iş burada durur
+          ls k
+      - name: Videoları üret
+        run: |
+          yap() {  # yap <onek> <cikti.mp4> [zoom]  (kaynak/reels-yap.sh ile aynı)
+            local on=$1 cikti=$2 zoom=${3:-0}; local -a girdi=(); local i=0 f
+            for f in $(ls k/$on-*.jpg | sort -V); do if [ "$zoom" = "1" ]; then girdi+=(-i "$f"); else girdi+=(-loop 1 -t 4.5 -i "$f"); fi; i=$((i+1)); done
+            local fc="" son ofs=4.0 n=$i k
+            if [ "$zoom" = "1" ]; then for ((k=0;k<n;k++)); do fc+="[$k:v]scale=2160:3840,zoompan=z='min(zoom+0.0009,1.13)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=135:s=1080x1920:fps=30,setsar=1[z$k];"; done
+            else for ((k=0;k<n;k++)); do fc+="[$k:v]setsar=1[z$k];"; done; fi
+            son="[z0]"
+            for ((k=1;k<n;k++)); do fc+="${son}[z$k]xfade=transition=fade:duration=0.5:offset=$ofs[v$k];"; son="[v$k]"; ofs=$(echo "$ofs+4.0"|bc); done
+            if [ "$n" -eq 1 ]; then fc="${fc}[z0]null[vout]"; else fc="${fc%;}"; fc="${fc%\[v$((n-1))\]}"; fc+="[vout]"; fi
+            ffmpeg -y -loglevel error "${girdi[@]}" -f lavfi -t 200 -i anullsrc=r=44100:cl=stereo -filter_complex "$fc" -map "[vout]" -map "$n:a" \
+              -c:v libx264 -pix_fmt yuv420p -r 30 -movflags +faststart -c:a aac -shortest "$cikti"
+          }
+          yap reel-a out/$D/reel-a.mp4; yap reel-b out/$D/reel-b.mp4; yap reel-c out/$D/reel-c.mp4 1
+          ls -la out/$D
+      - name: videolar dalına koy (yalnız son gün tutulur, depo şişmez)
+        run: |
+          cd out && git init -q -b videolar && git add . \
+          && git -c user.name=kt-reels -c user.email=kt-reels@users.noreply.github.com commit -qm "Reels $D" \
+          && git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" videolar
